@@ -1,0 +1,171 @@
+import React, { useState, useEffect } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { calculateRSI, calculateMACD, calculateEMA } from "./technicalIndicators";
+
+const COINS = [
+  "bitcoin", "ethereum", "solana", "cardano", "ripple",
+  "ondo", "hyperliquid", "chainlink"
+];
+
+const sanitizeInput = (input) => {
+  const div = document.createElement("div");
+  div.appendChild(document.createTextNode(input));
+  return div.innerHTML;
+};
+
+export default function CryptoGPTAssistant() {
+  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [prices, setPrices] = useState({});
+  const [chartData, setChartData] = useState([]);
+  const [selectedCoin, setSelectedCoin] = useState("bitcoin");
+
+  const sendMessage = async () => {
+    const sanitized = sanitizeInput(input.trim());
+    if (!sanitized) return;
+    const newMessages = [...messages, { sender: "user", text: sanitized }];
+    setMessages(newMessages);
+    setInput("");
+    setLoading(true);
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ messages: newMessages }),
+      });
+
+      const data = await res.json();
+      const reply = data.reply;
+      setMessages([...newMessages, { sender: "assistant", text: reply }]);
+    } catch (err) {
+      setMessages([...newMessages, { sender: "assistant", text: "Error getting response." }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchPrices = async () => {
+    try {
+      const res = await fetch(
+        `https://api.coingecko.com/api/v3/simple/price?ids=${COINS.join(",")}&vs_currencies=usd`
+      );
+      const data = await res.json();
+      setPrices(data);
+    } catch (err) {
+      console.error("Failed to fetch prices.", err);
+    }
+  };
+
+  const fetchChartData = async (coinId) => {
+    try {
+      const res = await fetch(
+        `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=1&interval=hourly`
+      );
+      const data = await res.json();
+      const formatted = data.prices.map((d) => ({
+        time: new Date(d[0]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        price: d[1]
+      }));
+
+      const ema = calculateEMA(formatted.map(p => p.price));
+      const rsi = calculateRSI(formatted.map(p => p.price));
+      const macd = calculateMACD(formatted.map(p => p.price));
+
+      const enriched = formatted.map((d, i) => ({
+        ...d,
+        ema: ema[i],
+        rsi: rsi[i],
+        macd: macd[i]?.macd,
+        signal: macd[i]?.signal
+      }));
+
+      setChartData(enriched);
+    } catch (err) {
+      console.error("Failed to fetch chart data.", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchPrices();
+    fetchChartData(selectedCoin);
+    const interval = setInterval(() => {
+      fetchPrices();
+      fetchChartData(selectedCoin);
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [selectedCoin]);
+
+  return (
+    <div className="max-w-4xl mx-auto mt-10 p-6 bg-gradient-to-br from-gray-950 to-gray-900 rounded-2xl shadow-lg">
+      <h1 className="text-3xl font-extrabold mb-6 text-center text-white tracking-tight">🪙 CryptoGPT Assistant</h1>
+
+      <div className="mb-6 bg-gray-800 text-white p-6 rounded-xl shadow-md">
+        <h2 className="text-xl font-semibold mb-4">Live Prices</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+          {COINS.map((coin) => (
+            <div
+              key={coin}
+              className="bg-gray-700 hover:bg-blue-600 transition-colors duration-200 p-3 rounded-lg text-center cursor-pointer"
+              onClick={() => setSelectedCoin(coin)}
+            >
+              <div className="text-lg font-medium capitalize">{coin}</div>
+              <div className="text-sm">${prices[coin]?.usd ?? "-"}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="mb-8 bg-white rounded-xl shadow-lg p-6">
+        <h2 className="text-xl font-bold mb-4 text-gray-900 capitalize">{selectedCoin} - 24H Chart + Indicators</h2>
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+            <XAxis dataKey="time" />
+            <YAxis domain={['auto', 'auto']} />
+            <Tooltip />
+            <CartesianGrid strokeDasharray="3 3" />
+            <Line type="monotone" dataKey="price" stroke="#3b82f6" strokeWidth={2} dot={false} name="Price" />
+            <Line type="monotone" dataKey="ema" stroke="#f97316" strokeWidth={1} dot={false} name="EMA" />
+            <Line type="monotone" dataKey="macd" stroke="#10b981" strokeWidth={1} dot={false} name="MACD" />
+            <Line type="monotone" dataKey="signal" stroke="#ef4444" strokeWidth={1} dot={false} name="Signal" />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      <Card className="min-h-[400px] p-6 space-y-4 bg-gray-800 text-white rounded-xl shadow-md">
+        <CardContent className="space-y-4 overflow-y-auto max-h-[400px]">
+          {messages.map((msg, i) => (
+            <div
+              key={i}
+              className={`p-3 rounded-xl ${
+                msg.sender === "user" ? "bg-blue-700 text-white" : "bg-gray-700 text-green-300"
+              }`}
+            >
+              <strong className="block mb-1">{msg.sender === "user" ? "You" : "CryptoGPT"}:</strong>
+              <span>{msg.text}</span>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <div className="flex mt-6 space-x-3">
+        <Input
+          placeholder="Ask about indicators, patterns, or trade advice..."
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          className="flex-1 rounded-xl px-4 py-3 text-base"
+          onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+        />
+        <Button onClick={sendMessage} disabled={loading} className="rounded-xl px-6 text-base">
+          {loading ? "Thinking..." : "Send"}
+        </Button>
+      </div>
+    </div>
+  );
+}
